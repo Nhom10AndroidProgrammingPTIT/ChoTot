@@ -29,6 +29,10 @@ import { MaterialIcons } from '@expo/vector-icons';
 import { Alert } from 'react-native';
 import ImageView from "react-native-image-viewing";
 import EmojiSelector from 'react-native-emoji-selector';
+import * as Notifications from 'expo-notifications';
+import { useNavigation } from "@react-navigation/native";
+import { NativeStackNavigationProp } from "@react-navigation/native-stack";
+
 
 type Props = NativeStackScreenProps<AppStackParamList, "ChatWindow">;
 
@@ -80,15 +84,37 @@ const ChatWindow: FC<Props> = ({ route }) => {
   const [fetchingChats, setFetchingChats] = useState(false);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
+
 
   const profile = authState.profile;
 
   useEffect(() => {
     if (!profile || !conversationId) return;
-    console.log('Initializing socket with:', { profileId: profile.id, conversationId });
+    
+    console.log('Setting up socket connection...'); // Add debug log
+    
     const cleanup = handleSocketConnection(profile, dispatch, conversationId);
-    return cleanup;
+    
+    return () => {
+      console.log('Cleaning up socket connection...'); // Add debug log
+      cleanup();
+    };
   }, [profile, conversationId]);
+
+  useEffect(() => {
+    const subscription = Notifications.addNotificationResponseReceivedListener(response => {
+      const notificationData = response.notification.request.content.data;
+      if (notificationData.conversationId !== route.params.conversationId) {
+        navigation.navigate('ChatWindow', {
+          conversationId: notificationData.conversationId,
+          peerProfile: notificationData.peerProfile
+        } as AppStackParamList['ChatWindow']);
+      }
+    });
+
+    return () => subscription.remove();
+  }, []);
 
   const handleOnMessageSend = async (messages: IMessage[]) => {
     if (!profile) return;
@@ -104,31 +130,24 @@ const ChatWindow: FC<Props> = ({ route }) => {
     }
     formData.append('content', currentMessage.text);
   
-    const res = await runAxiosAsync(
-      authClient.post(`/conversation/message/${conversationId}`, formData, {
-        headers: {'Content-Type': 'multipart/form-data'},
-      })
-    );
+    try {
+      const res = await runAxiosAsync(
+        authClient.post(`/conversation/message/${conversationId}`, formData, {
+          headers: {'Content-Type': 'multipart/form-data'},
+        })
+      );
   
-    if (res?.message) {
-      // Only update local state, let socket handle peer updates
-      dispatch(updateConversation({
-        conversationId,
-        chat: {
-          ...res.message,
-          _id: res.message.id // Ensure consistent ID usage
-        },
-        peerProfile,
-      }));
-      
-      // Emit to socket for peer updates
-      socket.emit('send_message', {
-        conversationId,
-        message: res.message,
-        to: peerProfile.id
-      });
+      if (res?.message) {
+        socket.emit('send_message', {
+          message: res.message,
+          conversationId,
+          to: peerProfile.id
+        });
+      }
+    } catch (error) {
+      console.error('Error sending message:', error);
     }
-  };
+  };  
 
   const pickImage = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -227,22 +246,22 @@ const ChatWindow: FC<Props> = ({ route }) => {
     }, [])
   );
 
-  useEffect(() => {
-    const messageHandler = (data: NewMessageResponse) => {
-      if (data.conversationId === conversationId && data.message?.id) {
-        dispatch(updateConversation({
-          conversationId: data.conversationId,
-          chat: data.message,
-          peerProfile: data.from
-        }));
-      }
-    };
+  // useEffect(() => {
+  //   const messageHandler = (data: NewMessageResponse) => {
+  //     if (data.conversationId === conversationId && data.message?.id) {
+  //       dispatch(updateConversation({
+  //         conversationId: data.conversationId,
+  //         chat: data.message,
+  //         peerProfile: data.from
+  //       }));
+  //     }
+  //   };
   
-    socket.on('new_message', messageHandler);
-    return () => {
-      socket.off('new_message', messageHandler);
-    };
-  }, [conversationId]);
+  //   socket.on('new_message', messageHandler);
+  //   return () => {
+  //     socket.off('new_message', messageHandler);
+  //   };
+  // }, [conversationId]);
 
   if (!profile) return null;
 
